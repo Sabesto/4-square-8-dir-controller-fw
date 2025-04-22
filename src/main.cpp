@@ -4,6 +4,14 @@
  * ----------------------------------------------------------------------------
  * © 2020 Stéphane Calderoni
  * ----------------------------------------------------------------------------
+ * TODO:
+ * - Make buzzer work
+ * - Flash all LEDS on boot (lamp test)
+ * - Measure relay current for each relay on boot and on command?
+ * - Disable PTT passthrough on high SWR
+ * - Finish work on settings stored in nvs using preferences library
+ * - Allow changing settings in preferences from a webpage
+ * 
  */
 
 #include <Arduino.h>
@@ -13,6 +21,8 @@
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
+//#include <Preferences.h>
+#include "OTA.h"
 #include "pins.h"
 #include "secrets.h"
 #include "rotswitch.h"
@@ -24,15 +34,8 @@
 // Definition of macros
 // ----------------------------------------------------------------------------
 
-#define LED_PIN   4
-#define BTN_PIN   0
-#define NEO_COUNT 1
 #define HTTP_PORT 80
-/*
-#define SCL_PIN   47
-#define SDA_PIN   21
-#define IO_EXP_1_ADDR 0x74
-*/
+
 // ----------------------------------------------------------------------------
 // Definition of global constants
 // ----------------------------------------------------------------------------
@@ -41,29 +44,39 @@
 const char *WIFI_SSID = ssid_name;
 const char *WIFI_PASS = ssid_password;
 
-uint8_t wantedDirection = 0;
-uint8_t actualDirection = 0;
-uint16_t currentSWR, scaledSWR, previousSWR, relayCurr= 0;
-bool currentPTT, previousPTT = 0;
-
-unsigned long prevUpdateMS = 0;
 const long minInterval = 250;
 
 const uint8_t directionRelayMask[] = {DIR_N, DIR_NE, DIR_E, DIR_SE, DIR_S, DIR_SW, DIR_W, DIR_NW};
 const uint8_t dirNumRelaysSet[] = {2, 0, 3, 6, 3, 2, 3, 4};
 const uint8_t directionLEDPin[] = {DIR_LED_N, DIR_LED_NE, DIR_LED_E, DIR_LED_SE, DIR_LED_S, DIR_LED_SW, DIR_LED_W, DIR_LED_NW};
 
-// Flags
-volatile bool checkIOEX2inputs = false;
-
 // ----------------------------------------------------------------------------
 // Definition of global variables
 // ----------------------------------------------------------------------------
+
+uint8_t wantedDirection = 0;
+uint8_t actualDirection = 0;
+uint16_t currentSWR, scaledSWR, previousSWR, relayCurr= 0;
+bool currentPTT, previousPTT = 0;
+
+unsigned long prevUpdateMS = 0;
+
+// Flags
+volatile bool checkIOEX2inputs = false;
+
+// Settings stored in nvs
+//int16_t scaleSWR = preferences.getShort("scaleswr", 1);
+//int16_t interceptSWR = preferences.getShort("interceptswr", 0);
+
+//uint16_t swLimitSWR = preferences.getUShort("swlimitswr", 1500);
+
 TCA9539 ioex1;
 TCA9539 ioex2;
 
 AsyncWebServer server(HTTP_PORT);
 AsyncWebSocket ws("/ws");
+
+//Preferences preferences;
 
 // ----------------------------------------------------------------------------
 // SPIFFS initialization
@@ -187,7 +200,6 @@ void IRAM_ATTR handlePTTint() {
     digitalWrite(PTT_LED, currentPTT ? LOW : HIGH);
 }
 
-
 uint8_t getRotarySwitchPosition() {
     uint8_t data = ioex2.input(TCA9539::Port::PORT0);
     // 0 means invalid position or in between positions
@@ -215,6 +227,16 @@ void setup() {
     initWebSocket();
     initWebServer();
     initSWRLEDs();
+
+/*
+    preferences.begin("4sq8dir", false);
+    scaleSWR = preferences.getShort("scaleswr", 1);
+    interceptSWR = preferences.getShort("interceptswr", 0);
+    swLimitSWR = preferences.getUShort("swlimitswr", 1500);
+*/
+
+    setupOTA("myESP32");
+    startOTATask();
 
     // PTT Input
     pinMode(PTT_SENSE, INPUT);
@@ -244,23 +266,17 @@ void setup() {
     
     // Interrupt from IO Expander 2, change on rotary switch
     attachInterrupt(INT, handleIOEX2int,FALLING);
+    
     // Interrupt from PTT, change on PTT switch
     attachInterrupt(PTT_SENSE, handlePTTint, CHANGE);
 
-    // We just booted, get position of rotswitch and set antenna to that
+    // We just booted, get position of rotswitch and set wanted direction to that
     wantedDirection = getRotarySwitchPosition();
 }
 
 // ----------------------------------------------------------------------------
 // Main control loop
 // ----------------------------------------------------------------------------
-/*
-TODO:
-- Buzzer
-- Show all LEDS on boot
-- Measure relay current for each relay on boot and on command?
-- Disable PTT passthrough on high SWR
-*/
 
 void loop() {
     ws.cleanupClients();
